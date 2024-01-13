@@ -1,0 +1,12 @@
+POV (Persistence of Vision) Bike Wheel Light 
+
+This is software that runs on an ESP32 and helps it talk to 168 addressable LED's.
+The LED's are attached in a plus (+) pattern on the spokes of a bike wheel (90 deg apart)
+They update as the wheel spins creating a persistence of vision effect.
+At a typical speed of 20 km/h and 2.8 rotations per second and an angular resolution of 1 degree
+these lights  update over 1000 times per second to deliver a crisp still image.
+
+A hall effect sensor and magnet are used to determine the right timing.
+
+This runs on a custom PCB i've made that includes an ESP32 with associated power components, flash memory and addressable LED's.
+
