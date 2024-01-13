@@ -10,3 +10,4 @@ A hall effect sensor and magnet are used to determine the right timing.
 
 This runs on a custom PCB i've made that includes an ESP32 with associated power components, flash memory and addressable LED's.
 
+Photos, PCB schematics, blog post and explanation to come!
