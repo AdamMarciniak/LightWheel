@@ -26,6 +26,7 @@ Every time the hall effect sensor passes the magnet, it triggers an interrupt wh
 we just crossed "zero" and also how fast the last rotation was in order to calculate how often the LED's need to update.
 
 ## Animations:
+
 One of the goals of this device was to be able to play a sequence of frames as an animation. The problem is, this doesn't work unless your animation is updating at only the wheel spin rate times four. Which would be anywhere from say 5-12 fps. Not too bad
 
 Why can't we do it faster? Because of the way the POV effect works. In order for us to see a full frame, the light arms need to sweep through one quadrant (45 deg) to "fill in" the whole light. So the frame needs to be displayed for a whole quarter turn before we update with the next frame. 
@@ -42,3 +43,6 @@ The tricky thing is making sure the copying from flash to the frame buffer is fa
 - Wifi frame uploads. 
 - Better code layout.
 - Animation.
+
+
+![Messenger_creation_646104513979992](https://github.com/AdamMarciniak/LightWheel/assets/17841889/16a3c867-0d8f-48db-b668-52a30466e095)
