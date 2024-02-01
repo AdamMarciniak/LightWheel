@@ -71,23 +71,21 @@ enum State {
 // State state = FIRST_STOP;
 State state = DISPLAY_LEDS;
 
-unsigned long before = 0;
-unsigned long after = 0;
-
-unsigned long bef = 0;
-
 unsigned long lastMagnetTime = 0;
 unsigned long nextMagnetTime = 1000;
 
 unsigned long lastMagnetTime1 = 0;
 unsigned long nextMagnetTime1 = 1000;
 unsigned long rotTime = 1000;
-long armPos = 0;
+long armPosition = 0;
+int frameNum = 0;
 
 unsigned long timeStopped = 0;
 
 Chrono flashReadChrono;
 Chrono ledChrono(Chrono::MICROS);
+Chrono frameChrono;
+
 Chrono spinCheckChrono;
 
 void IRAM_ATTR magnetISR() {
@@ -101,7 +99,7 @@ void IRAM_ATTR magnetISR() {
   lastMagnetTime = lastMagnetTime1;
   nextMagnetTime = nextMagnetTime1;
   rotTime = nextMagnetTime - lastMagnetTime;
-  armPos = 0;
+  armPosition = 0;
   ledChrono.restart();
 }
 
@@ -124,7 +122,7 @@ spi_bus_config_t spiConfigFlash = {
 DRAM_ATTR int queueStatus = 2;
 DRAM_ATTR int queueStatusFlash = 2;
 DRAM_ATTR boolean flashBusy = false;
-DRAM_ATTR boolean ledReady = true;
+DRAM_ATTR boolean isSPIReady = true;
 
 int color = 1;
 
@@ -132,10 +130,10 @@ unsigned long milPre = 0;
 unsigned long milPost = 0;
 
 // Before we write to LED's, set ready to false to prevent more writes
-void IRAM_ATTR callBackPreLED(spi_transaction_t *trans) { ledReady = false; };
+void IRAM_ATTR callBackPreLED(spi_transaction_t *trans) { isSPIReady = false; };
 
 // Once writing is done, allow writes
-void IRAM_ATTR callBackPostLED(spi_transaction_t *trans) { ledReady = true; };
+void IRAM_ATTR callBackPostLED(spi_transaction_t *trans) { isSPIReady = true; };
 
 // Same with flash
 void IRAM_ATTR callBackPreFlash(spi_transaction_t *trans) { flashBusy = true; };
@@ -178,8 +176,10 @@ uint8_t *armBuffer;
 uint8_t *darkBuffer;
 uint8_t *frameData;
 
-uint8_t *flashReadBuffer;
-uint8_t *bufferToRead = flashReadBuffer;
+uint8_t *frameBuffer1;
+uint8_t *frameBuffer2;
+
+uint8_t *bufferToRead = frameBuffer1;
 uint8_t *testReadBuffer;
 
 uint8_t *busyBuffer;
@@ -306,7 +306,10 @@ void setup() {
   // Init memory buffers
 
   // Holds data of whole frame
-  flashReadBuffer = static_cast<uint8_t *>(
+  frameBuffer1 = static_cast<uint8_t *>(
+      heap_caps_malloc(ACTUAL_FRAME_DATA_SIZE, MALLOC_CAP_DMA));
+
+  frameBuffer2 = static_cast<uint8_t *>(
       heap_caps_malloc(ACTUAL_FRAME_DATA_SIZE, MALLOC_CAP_DMA));
 
   // Flag for knowing when flash is busy
@@ -319,7 +322,7 @@ void setup() {
   darkBuffer = static_cast<uint8_t *>(heap_caps_malloc(716, MALLOC_CAP_DMA));
 
   for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE; i += 1) {
-    flashReadBuffer[i] = 0X00;
+    frameBuffer1[i] = 0X00;
   }
 
   ledCounter = 0;
@@ -330,10 +333,25 @@ void setup() {
       ledCounter = 0;
       ledIndex = ledCounter * 3;
     }
-    flashReadBuffer[i] = 0B11100001;
-    flashReadBuffer[i + 1] = ledArray2[ledIndex + 2];
-    flashReadBuffer[i + 2] = ledArray2[ledIndex + 1];
-    flashReadBuffer[i + 3] = ledArray2[ledIndex];
+    frameBuffer1[i] = 0B11100001;
+    frameBuffer1[i + 1] = ledArray2[ledIndex + 2];
+    frameBuffer1[i + 2] = ledArray2[ledIndex + 1];
+    frameBuffer1[i + 3] = ledArray2[ledIndex];
+    ledCounter += 1;
+  }
+
+  ledCounter = 0;
+  ledIndex = 0;
+  for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE - 4; i += 4) {
+    ledIndex = ledCounter * 3;
+    if (ledIndex >= 45360) {
+      ledCounter = 0;
+      ledIndex = ledCounter * 3;
+    }
+    frameBuffer2[i] = 0B11100001;
+    frameBuffer2[i + 1] = ledArray3[ledIndex + 2];
+    frameBuffer2[i + 2] = ledArray3[ledIndex + 1];
+    frameBuffer2[i + 3] = ledArray3[ledIndex];
     ledCounter += 1;
   }
 
@@ -361,13 +379,29 @@ void setup() {
   attachInterrupt(5, magnetISR, FALLING);
 }
 
+void copyMemoryToArms(uint8_t *inputBuffer, long armPosition) {
+  memcpy(armBuffer, &inputBuffer[armPosition * BYTES_PER_ARM], BYTES_PER_ARM);
+  memcpy(&armBuffer[BYTES_PER_ARM],
+         &inputBuffer[(armPosition * BYTES_PER_ARM + ARM_OFFSET_SIZE) %
+                      BYTES_PER_FRAME],
+         BYTES_PER_ARM);
+  memcpy(&armBuffer[BYTES_PER_ARM * 2],
+         &inputBuffer[(armPosition * BYTES_PER_ARM + ARM_2_OFFSET) %
+                      BYTES_PER_FRAME],
+         BYTES_PER_ARM);
+  memcpy(&armBuffer[BYTES_PER_ARM * 3],
+         &inputBuffer[(armPosition * BYTES_PER_ARM + ARM_3_OFFSET) %
+                      BYTES_PER_FRAME],
+         BYTES_PER_ARM);
+}
+
 void loop() {
 
   switch (state) {
 
   case (FIRST_STOP):
     // Write all dark to turn off lights.
-    if (ledReady == true) {
+    if (isSPIReady) {
       spi_transaction_t transactionLED{
           .cmd = 0X00,
           .addr = 0X00,
@@ -392,33 +426,35 @@ void loop() {
     //   break;
     // }
 
+    if (frameChrono.hasPassed(3000)) {
+      frameChrono.restart();
+      if (frameNum == 0) {
+        frameNum = 1;
+        return;
+      }
+      if (frameNum == 1) {
+        frameNum = 0;
+        return;
+      }
+    }
+
     // Change this to use magnet  for display switching or  time based
     // if (ledChrono.hasPassed((long)(rotTime / 360))) {
     if (ledChrono.hasPassed((long)(1500000 / 360))) {
 
       ledChrono.restart();
-      armPos += 1;
-      if (armPos >= 360 / ANGLE_RESOLUTION_DEG) {
-        armPos = 0;
+      armPosition += 1;
+      if (armPosition >= 360 / ANGLE_RESOLUTION_DEG) {
+        armPosition = 0;
       }
-      if (ledReady == true) {
+      if (isSPIReady) {
         // Use this below for all 4 arms
         // This take like 3 microseconds. No need to optimize
-        memcpy(armBuffer, &flashReadBuffer[armPos * BYTES_PER_ARM],
-               BYTES_PER_ARM);
-
-        memcpy(&armBuffer[BYTES_PER_ARM],
-               &flashReadBuffer[(armPos * BYTES_PER_ARM + ARM_OFFSET_SIZE) %
-                                BYTES_PER_FRAME],
-               BYTES_PER_ARM);
-        memcpy(&armBuffer[BYTES_PER_ARM * 2],
-               &flashReadBuffer[(armPos * BYTES_PER_ARM + ARM_2_OFFSET) %
-                                BYTES_PER_FRAME],
-               BYTES_PER_ARM);
-        memcpy(&armBuffer[BYTES_PER_ARM * 3],
-               &flashReadBuffer[(armPos * BYTES_PER_ARM + ARM_3_OFFSET) %
-                                BYTES_PER_FRAME],
-               BYTES_PER_ARM);
+        if (frameNum == 0) {
+          copyMemoryToArms(frameBuffer1, armPosition);
+        } else {
+          copyMemoryToArms(frameBuffer2, armPosition);
+        }
 
         spi_transaction_t transactionLED{
             .cmd = 0X00,
