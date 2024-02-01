@@ -1,4 +1,12 @@
+
 # POV (Persistence of Vision) Bike Wheel Light 
+
+
+## Updates:
+- Currently got multiple frame switching working. 
+- Next work to try would be to try and save frames to the flash chip and read off of it.
+- While one frame is being read from, save flash data to other frame.
+- Wifi image transfers can happen maybe when bike has been standing still for some time or just use second core most likely.
 
 This is software that runs on an ESP32 and helps it talk to 168 addressable LED's.
 The LED's are attached in a plus (+) pattern on the spokes of a bike wheel (90 deg apart)
