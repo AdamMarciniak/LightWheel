@@ -129,7 +129,7 @@ spi_bus_config_t spiConfigFlash = {
 
 DRAM_ATTR int queueStatus = 2;
 DRAM_ATTR int queueStatusFlash = 2;
-DRAM_ATTR boolean flashBusy = false;
+DRAM_ATTR boolean isFlashBusy = false;
 DRAM_ATTR boolean ledReady = true;
 
 int color = 1;
@@ -142,10 +142,12 @@ void IRAM_ATTR callBackPreLED(spi_transaction_t *trans) { ledReady = false; };
 
 void IRAM_ATTR callBackPostLED(spi_transaction_t *trans) { ledReady = true; };
 
-void IRAM_ATTR callBackPreFlash(spi_transaction_t *trans) { flashBusy = true; };
+void IRAM_ATTR callBackPreFlash(spi_transaction_t *trans) {
+  isFlashBusy = true;
+};
 
 void IRAM_ATTR callBackPostFlash(spi_transaction_t *trans) {
-  flashBusy = false;
+  isFlashBusy = false;
 };
 
 const spi_device_interface_config_t deviceConfigLED = {
