@@ -181,9 +181,9 @@ uint8_t *frameData;
 
 uint8_t *writePageData;
 uint8_t *oneLEDData;
-uint8_t *flashReadBuffer;
+uint8_t *flashBuffer;
 uint8_t *flashReadBuffer2;
-uint8_t *bufferToRead = flashReadBuffer;
+uint8_t *bufferToRead = flashBuffer;
 uint8_t *bufferToWriteFrom = flashReadBuffer2;
 uint8_t *testReadBuffer;
 
@@ -336,7 +336,7 @@ void setup() {
   writePageData = static_cast<uint8_t *>(
       heap_caps_malloc(MAX_FLASH_WRITE_BYTES, MALLOC_CAP_DMA));
   oneLEDData = static_cast<uint8_t *>(heap_caps_malloc(4, MALLOC_CAP_DMA));
-  flashReadBuffer = static_cast<uint8_t *>(
+  flashBuffer = static_cast<uint8_t *>(
       heap_caps_malloc(ACTUAL_FRAME_DATA_SIZE, MALLOC_CAP_DMA));
   flashReadBuffer2 = static_cast<uint8_t *>(
       heap_caps_malloc(ACTUAL_FRAME_DATA_SIZE, MALLOC_CAP_DMA));
@@ -345,7 +345,7 @@ void setup() {
   darkBuffer = static_cast<uint8_t *>(heap_caps_malloc(716, MALLOC_CAP_DMA));
 
   for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE; i += 1) {
-    flashReadBuffer[i] = 0X00;
+    flashBuffer[i] = 0X00;
     flashReadBuffer2[i] = 0X00;
   }
 
@@ -369,10 +369,10 @@ void setup() {
       ledCounter = 0;
       ledIndex = ledCounter * 3;
     }
-    flashReadBuffer[i] = 0B11100001;
-    flashReadBuffer[i + 1] = ledArray2[ledIndex + 2];
-    flashReadBuffer[i + 2] = ledArray2[ledIndex + 1];
-    flashReadBuffer[i + 3] = ledArray2[ledIndex];
+    flashBuffer[i] = 0B11100001;
+    flashBuffer[i + 1] = ledArray2[ledIndex + 2];
+    flashBuffer[i + 2] = ledArray2[ledIndex + 1];
+    flashBuffer[i + 3] = ledArray2[ledIndex];
     ledCounter += 1;
   }
 
@@ -498,15 +498,15 @@ void loop() {
     if (flashReadChrono.hasPassed(2000)) {
       flashReadChrono.restart();
       if (frameNum == 1) {
-        bufferToRead = flashReadBuffer;
-        bufferToWriteFrom = flashReadBuffer;
+        bufferToRead = flashBuffer;
+        bufferToWriteFrom = flashBuffer;
         frameNum = 2;
         newFrame = true;
         frameOffset = 0;
         readPageNum = 0;
       } else {
         bufferToRead = flashReadBuffer2;
-        bufferToWriteFrom = flashReadBuffer;
+        bufferToWriteFrom = flashBuffer;
         frameNum = 1;
         newFrame = true;
         frameOffset = ACTUAL_FRAME_DATA_SIZE + 4092;

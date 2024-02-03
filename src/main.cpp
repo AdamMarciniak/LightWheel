@@ -7,6 +7,17 @@
 // File to store LED data
 #include <ledArray.h>
 
+#include <WiFi.h>
+#include <WiFiAP.h>
+#include <WiFiClient.h>
+
+const char *ssid = "BikeLight";
+const char *password = "bikebikebike";
+
+WiFiServer server(80);
+
+TaskHandle_t core0Task;
+
 // Flash datasheet:
 // https://www.winbond.com/resource-files/w25q80dv%20dl_revh_10022015.pdf
 // Flash registers
@@ -173,7 +184,7 @@ uint8_t *frameBuffer1;
 uint8_t *frameBuffer2;
 
 // Holds raw data from flash
-uint8_t *flashReadBuffer;
+uint8_t *flashBuffer;
 
 // Small buffer to save flash busy state
 uint8_t *busyBuffer;
@@ -263,6 +274,63 @@ void chipErase(spi_device_handle_t deviceHandle) {
   delay(10);
 }
 
+void Task_Wifi_Handle(void *pvParameters) {
+
+  WiFi.begin(ssid, password);
+
+  if (!WiFi.softAP(ssid, password)) {
+    log_e("Soft AP creation failed.");
+    while (1)
+      ;
+  }
+  IPAddress myIP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(myIP);
+  server.begin();
+  int k = 0;
+  long sumBytesReceived = 0;
+  bool printBytes = false;
+  for (;;) {
+    WiFiClient client = server.accept();
+    if (client) {
+      while (client.connected()) { // loop while the client's connected
+        long numBytes = client.available();
+        if (numBytes) {
+          Serial.println(numBytes);
+
+          // Keep track of bytes received because a single send
+          // Can result in many chunks of numBytes sent
+          // So we sum up the chunks and keep track.
+          // For this to work properly, sender must send values as hexadecimal
+          // not ints.
+          client.readBytes(&flashBuffer[sumBytesReceived], numBytes);
+          sumBytesReceived += numBytes;
+
+          if (sumBytesReceived >= FRAME_INPUT_SIZE) {
+            for (long i = 0; i < sumBytesReceived; i += 1) {
+              // This works. Next steps are to save this buffer to actual flash.
+              // Serial.println(flashBuffer[i]);
+
+              for (long i = 0;
+                   i < (FRAME_INPUT_SIZE / MAX_FLASH_WRITE_BYTES) + 1; i += 1) {
+                long address = i * MAX_FLASH_WRITE_BYTES;
+                writeEnable(deviceHandleFlash);
+                writeData(deviceHandleFlash, MAX_FLASH_WRITE_BYTES * 8,
+                          &flashBuffer[address], address);
+
+                while (isFlashBusy)
+                  ;
+                Serial.println("Wrote data.");
+              }
+            }
+            sumBytesReceived = 0;
+          }
+        }
+      }
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -294,114 +362,119 @@ void setup() {
   // Holds data for arms when dark
   darkBuffer = static_cast<uint8_t *>(heap_caps_malloc(716, MALLOC_CAP_DMA));
 
-  // Holds data from flash reading
-  flashReadBuffer = static_cast<uint8_t *>(
+  // Holds data to help write/read to flash
+  flashBuffer = static_cast<uint8_t *>(
       heap_caps_malloc(FRAME_INPUT_SIZE, MALLOC_CAP_DMA));
 
   for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE; i += 1) {
     frameBuffer1[i] = 0X00;
   }
 
-  long ledCounter = 0;
-  long ledIndex = 0;
-  for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE - 4; i += 4) {
-    ledIndex = ledCounter * 3;
-    if (ledIndex >= 45360) {
-      ledCounter = 0;
-      ledIndex = ledCounter * 3;
-    }
-    frameBuffer1[i] = 0B11100001;
-    frameBuffer1[i + 1] = ledArray2[ledIndex + 2];
-    frameBuffer1[i + 2] = ledArray2[ledIndex + 1];
-    frameBuffer1[i + 3] = ledArray2[ledIndex];
-    ledCounter += 1;
-  }
+  xTaskCreatePinnedToCore(Task_Wifi_Handle, "core0Task", 4096, NULL,
+                          tskIDLE_PRIORITY, &core0Task, 0);
 
-  ledCounter = 0;
-  ledIndex = 0;
-  for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE - 4; i += 4) {
-    ledIndex = ledCounter * 3;
-    if (ledIndex >= 45360) {
-      ledCounter = 0;
-      ledIndex = ledCounter * 3;
-    }
-    frameBuffer2[i] = 0B11100001;
-    frameBuffer2[i + 1] = ledArray3[ledIndex + 2];
-    frameBuffer2[i + 2] = ledArray3[ledIndex + 1];
-    frameBuffer2[i + 3] = ledArray3[ledIndex];
-    ledCounter += 1;
-  }
+  // long ledCounter = 0;
+  // long ledIndex = 0;
+  // for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE - 4; i += 4) {
+  //   ledIndex = ledCounter * 3;
+  //   if (ledIndex >= 45360) {
+  //     ledCounter = 0;
+  //     ledIndex = ledCounter * 3;
+  //   }
+  //   frameBuffer1[i] = 0B11100001;
+  //   frameBuffer1[i + 1] = ledArray2[ledIndex + 2];
+  //   frameBuffer1[i + 2] = ledArray2[ledIndex + 1];
+  //   frameBuffer1[i + 3] = ledArray2[ledIndex];
+  //   ledCounter += 1;
+  // }
+  // Disable flash stuff
+  // ledCounter = 0;
+  // ledIndex = 0;
+  // for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE - 4; i += 4) {
+  //   ledIndex = ledCounter * 3;
+  //   if (ledIndex >= 45360) {
+  //     ledCounter = 0;
+  //     ledIndex = ledCounter * 3;
+  //   }
+  //   frameBuffer2[i] = 0B11100001;
+  //   frameBuffer2[i + 1] = ledArray3[ledIndex + 2];
+  //   frameBuffer2[i + 2] = ledArray3[ledIndex + 1];
+  //   frameBuffer2[i + 3] = ledArray3[ledIndex];
+  //   ledCounter += 1;
+  // }
 
-  writeEnable(deviceHandleFlash);
-  chipErase(deviceHandleFlash);
-  waitBusy(deviceHandleFlash);
-  Serial.println("Finished Erase");
+  // writeEnable(deviceHandleFlash);
+  // chipErase(deviceHandleFlash);
+  // waitBusy(deviceHandleFlash);
+  // Serial.println("Finished Erase");
 
-  // Writing 45568 per frame to flash chip
-  // Try writing the raw progmem stuff to flash as a test
-  for (long i = 0; i < (FRAME_INPUT_SIZE / MAX_FLASH_WRITE_BYTES) + 1; i += 1) {
-    long address = i * MAX_FLASH_WRITE_BYTES;
-    writeEnable(deviceHandleFlash);
-    writeData(deviceHandleFlash, MAX_FLASH_WRITE_BYTES * 8, &ledArray2[address],
-              address);
+  // // Writing 45568 per frame to flash chip
+  // // Try writing the raw progmem stuff to flash as a test
+  // for (long i = 0; i < (FRAME_INPUT_SIZE / MAX_FLASH_WRITE_BYTES) + 1; i +=
+  // 1) {
+  //   long address = i * MAX_FLASH_WRITE_BYTES;
+  //   writeEnable(deviceHandleFlash);
+  //   writeData(deviceHandleFlash, MAX_FLASH_WRITE_BYTES * 8,
+  //   &ledArray2[address],
+  //             address);
 
-    while (isFlashBusy)
-      ;
-    Serial.println("Wrote data.");
-  }
+  //   while (isFlashBusy)
+  //     ;
+  //   // Serial.println("Wrote data.");
+  // }
 
-  Serial.println("Writing data done");
+  // Serial.println("Writing data done");
 
-  spi_transaction_t transactionRead{
-      .flags = SPI_TRANS_VARIABLE_CMD | SPI_TRANS_VARIABLE_ADDR |
-               SPI_TRANS_VARIABLE_DUMMY,
-      .cmd = CMD_READ_DATA_FAST,
-      .addr = 0,
-      .length = 8,
-      .rxlength = 8 * MAX_READ_SIZE,
-      .rx_buffer = flashReadBuffer,
-  };
+  // spi_transaction_t transactionRead{
+  //     .flags = SPI_TRANS_VARIABLE_CMD | SPI_TRANS_VARIABLE_ADDR |
+  //              SPI_TRANS_VARIABLE_DUMMY,
+  //     .cmd = CMD_READ_DATA_FAST,
+  //     .addr = 0,
+  //     .length = 8,
+  //     .rxlength = 8 * MAX_READ_SIZE,
+  //     .rx_buffer = flashBuffer,
+  // };
 
-  spi_transaction_ext_t transactionReadExt{
-      .base = transactionRead,
-      .command_bits = 8,
-      .address_bits = 24,
-      // If reading data fast, must use 8 dummy bits
-      .dummy_bits = 8};
-  spi_device_queue_trans(deviceHandleFlash,
-                         (spi_transaction_t *)&transactionReadExt,
-                         portMAX_DELAY);
+  // spi_transaction_ext_t transactionReadExt{
+  //     .base = transactionRead,
+  //     .command_bits = 8,
+  //     .address_bits = 24,
+  //     // If reading data fast, must use 8 dummy bits
+  //     .dummy_bits = 8};
+  // spi_device_queue_trans(deviceHandleFlash,
+  //                        (spi_transaction_t *)&transactionReadExt,
+  //                        portMAX_DELAY);
 
-  while (isFlashBusy) {
-    Serial.println("Flash busy reading..");
-  }
-  Serial.println("Flash DONE");
+  // while (isFlashBusy) {
+  //   Serial.println("Flash busy reading..");
+  // }
+  // Serial.println("Flash DONE");
+
+  // // for (long i = 0; i < 150; i += 1) {
+  // //   // Serial.println(flashReadBuffer[i], BIN);
+  // //   Serial.println(static_cast<int>(flashReadBuffer[i]));
+  // // }
+  // ledCounter = 0;
+  // ledIndex = 0;
+  // long st = micros();
+  // for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE - 4; i += 4) {
+  //   ledIndex = ledCounter * 3;
+  //   if (ledIndex >= FRAME_INPUT_SIZE) {
+  //     ledCounter = 0;
+  //     ledIndex = ledCounter * 3;
+  //   }
+  //   frameBuffer1[i] = 0B11100001;
+  //   frameBuffer1[i + 1] = flashBuffer[ledIndex + 2];
+  //   frameBuffer1[i + 2] = flashBuffer[ledIndex + 1];
+  //   frameBuffer1[i + 3] = flashBuffer[ledIndex];
+  //   ledCounter += 1;
+  // }
+  // Serial.print("Time for conversion: ");
+  // Serial.println(micros() - st);
 
   // for (long i = 0; i < 150; i += 1) {
-  //   // Serial.println(flashReadBuffer[i], BIN);
-  //   Serial.println(static_cast<int>(flashReadBuffer[i]));
+  //   Serial.println(static_cast<int>(frameBuffer1[i]));
   // }
-  ledCounter = 0;
-  ledIndex = 0;
-  long st = micros();
-  for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE - 4; i += 4) {
-    ledIndex = ledCounter * 3;
-    if (ledIndex >= FRAME_INPUT_SIZE) {
-      ledCounter = 0;
-      ledIndex = ledCounter * 3;
-    }
-    frameBuffer1[i] = 0B11100001;
-    frameBuffer1[i + 1] = flashReadBuffer[ledIndex + 2];
-    frameBuffer1[i + 2] = flashReadBuffer[ledIndex + 1];
-    frameBuffer1[i + 3] = flashReadBuffer[ledIndex];
-    ledCounter += 1;
-  }
-  Serial.print("Time for conversion: ");
-  Serial.println(micros() - st);
-
-  for (long i = 0; i < 150; i += 1) {
-    Serial.println(static_cast<int>(frameBuffer1[i]));
-  }
 
   armBuffer[676 - 4] = 0XFF;
   armBuffer[676 - 3] = 0XFF;

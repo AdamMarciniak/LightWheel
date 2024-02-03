@@ -187,11 +187,11 @@ uint8_t *frameData;
 
 uint8_t *writePageData;
 uint8_t *oneLEDData;
-uint8_t *flashReadBuffer;
+uint8_t *flashBuffer;
 uint8_t *flashReadBuffer2;
 
-uint8_t *bufferToRead = flashReadBuffer;
-uint8_t *bufferToWriteFrom = flashReadBuffer;
+uint8_t *bufferToRead = flashBuffer;
+uint8_t *bufferToWriteFrom = flashBuffer;
 uint8_t *testReadBuffer;
 
 uint8_t *busyBuffer;
@@ -376,7 +376,7 @@ uint64_t address = 0;
 void ledTask(void *parameter) {
 
   pinMode(5, INPUT_PULLUP);
-  bufferToWriteFrom = flashReadBuffer;
+  bufferToWriteFrom = flashBuffer;
   esp_err_t resultLEDInit = spi_bus_initialize(LED_HOST, &spiConfigLED, 2);
   ESP_ERROR_CHECK(resultLEDInit);
   esp_err_t deviceResultLED =
@@ -392,7 +392,7 @@ void ledTask(void *parameter) {
       FLASH_HOST, &deviceConfigFlash, &deviceHandleFlashWrite);
   ESP_ERROR_CHECK(deviceResultFlashWrite);
 
-  flashReadBuffer = static_cast<uint8_t *>(
+  flashBuffer = static_cast<uint8_t *>(
       heap_caps_malloc(ACTUAL_FRAME_DATA_SIZE, MALLOC_CAP_DMA));
   // armBuffer = static_cast<uint8_t *>(heap_caps_malloc(676, MALLOC_CAP_DMA));
   armBuffer = static_cast<uint8_t *>(heap_caps_malloc(716, MALLOC_CAP_DMA));
@@ -412,7 +412,7 @@ void ledTask(void *parameter) {
   darkBuffer[716 - 1] = 0XFF;
 
   for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE; i += 1) {
-    flashReadBuffer[i] = 0X00;
+    flashBuffer[i] = 0X00;
   }
 
   for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE - 4; i += 4) {
@@ -421,13 +421,13 @@ void ledTask(void *parameter) {
       ledCounter = 0;
       ledIndex = ledCounter * 3;
     }
-    flashReadBuffer[i] = 0B11100001;
+    flashBuffer[i] = 0B11100001;
     // flashReadBuffer[i + 1] = ledArray[ledIndex + 2];
     // flashReadBuffer[i + 2] = ledArray[ledIndex + 1];
     // flashReadBuffer[i + 3] = ledArray[ledIndex];
-    flashReadBuffer[i + 1] = 150;
-    flashReadBuffer[i + 2] = 150;
-    flashReadBuffer[i + 3] = 150;
+    flashBuffer[i + 1] = 150;
+    flashBuffer[i + 2] = 150;
+    flashBuffer[i + 3] = 150;
     ledCounter += 1;
   }
 
