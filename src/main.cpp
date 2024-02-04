@@ -1,15 +1,19 @@
 #include "../../../framework-arduinoespressif32/tools/sdk/esp32/include/driver/include/driver/spi_common.h"
 #include "../../../framework-arduinoespressif32/tools/sdk/esp32/include/driver/include/driver/spi_master.h"
 #include "../../../framework-arduinoespressif32/tools/sdk/esp32/include/heap/include/esp_heap_caps.h"
+#include "./WiFi/WiFi.h"
+#include "./WiFi/WiFiAP.h"
+#include "./WiFi/WiFiClient.h"
+
 #include <Arduino.h>
 #include <Chrono.h>
 
 // File to store LED data
 #include <ledArray.h>
 
-#include <WiFi.h>
-#include <WiFiAP.h>
-#include <WiFiClient.h>
+// #include <WiFi.h>
+// #include <WiFiAP.h>
+// #include <WiFiClient.h>
 
 const char *ssid = "BikeLight";
 const char *password = "bikebikebike";
@@ -161,9 +165,9 @@ const spi_device_interface_config_t deviceConfigFlash = {
     .address_bits = 0,
     .dummy_bits = 0,
     .mode = 0,
-    // Anything faster messes up reading.
+    // Anything faster than 27 mhz messes up reading.
     // Can maybe set to higher for writing later
-    .clock_speed_hz = SPI_MASTER_FREQ_26M,
+    .clock_speed_hz = SPI_MASTER_FREQ_80M,
     .spics_io_num = 15,
     .flags = SPI_DEVICE_HALFDUPLEX | SPI_DEVICE_NO_DUMMY,
     .queue_size = 1,
@@ -277,7 +281,6 @@ void chipErase(spi_device_handle_t deviceHandle) {
 void Task_Wifi_Handle(void *pvParameters) {
 
   WiFi.begin(ssid, password);
-
   if (!WiFi.softAP(ssid, password)) {
     log_e("Soft AP creation failed.");
     while (1)
@@ -285,48 +288,80 @@ void Task_Wifi_Handle(void *pvParameters) {
   }
   IPAddress myIP = WiFi.softAPIP();
   Serial.print("AP IP address: ");
-  Serial.println(myIP);
   server.begin();
+  Serial.println(myIP);
+
   int k = 0;
-  long sumBytesReceived = 0;
+  long flashBufferIndex = 0;
   bool printBytes = false;
   for (;;) {
+    vTaskDelay(5 / portTICK_PERIOD_MS);
     WiFiClient client = server.accept();
     if (client) {
+      Serial.println("Client Connected!");
+      client.setNoDelay(1);
+      client.setTimeout(4000);
       while (client.connected()) { // loop while the client's connected
         long numBytes = client.available();
         if (numBytes) {
           Serial.println(numBytes);
-
           // Keep track of bytes received because a single send
           // Can result in many chunks of numBytes sent
           // So we sum up the chunks and keep track.
           // For this to work properly, sender must send values as hexadecimal
           // not ints.
-          client.readBytes(&flashBuffer[sumBytesReceived], numBytes);
-          sumBytesReceived += numBytes;
+          vTaskDelay(5 / portTICK_PERIOD_MS);
 
-          if (sumBytesReceived >= FRAME_INPUT_SIZE) {
-            for (long i = 0; i < sumBytesReceived; i += 1) {
-              // This works. Next steps are to save this buffer to actual flash.
-              // Serial.println(flashBuffer[i]);
+          long int ia = micros();
 
-              for (long i = 0;
-                   i < (FRAME_INPUT_SIZE / MAX_FLASH_WRITE_BYTES) + 1; i += 1) {
-                long address = i * MAX_FLASH_WRITE_BYTES;
-                writeEnable(deviceHandleFlash);
-                writeData(deviceHandleFlash, MAX_FLASH_WRITE_BYTES * 8,
-                          &flashBuffer[address], address);
+          client.read(&flashBuffer[flashBufferIndex], numBytes);
+          Serial.print("READ BYTES TIME = ");
+          Serial.println(micros() - ia);
+          flashBufferIndex += numBytes;
 
-                while (isFlashBusy)
-                  ;
-                Serial.println("Wrote data.");
-              }
+          if (flashBufferIndex >= FRAME_INPUT_SIZE) {
+            Serial.println("Transfer Done");
+            long ab = micros();
+            // for (long i = 0; i < sumBytesReceived; i += 1) {
+            // Serial.println(flashBuffer[i]);
+
+            for (long i = 0; i < FRAME_INPUT_SIZE / 3; i += 1) {
+              frameBuffer1[i * 4] = 0B11100001;
+              frameBuffer1[i * 4 + 1] = flashBuffer[i * 3 + 2];
+              frameBuffer1[i * 4 + 2] = flashBuffer[i * 3 + 1];
+              frameBuffer1[i * 4 + 3] = flashBuffer[i * 3];
             }
-            sumBytesReceived = 0;
+
+            // for (long i = 0; i < 100; i += 1) {
+            //   Serial.println(frameBuffer1[i]);
+            // }
+
+            // Serial.println("Flash buffer..");
+            // for (long i = 0; i < 100; i += 1) {
+            //   Serial.println(flashBuffer[i]);
+            // }
+
+            // Serial.println(micros() - ab);
+
+            // for (long i = 0; i < (FRAME_INPUT_SIZE / MAX_FLASH_WRITE_BYTES) +
+            // 1;
+            //      i += 1) {
+            //   long address = i * MAX_FLASH_WRITE_BYTES;
+            //   writeEnable(deviceHandleFlash);
+            //   writeData(deviceHandleFlash, MAX_FLASH_WRITE_BYTES * 8,
+            //             &flashBuffer[address], address);
+
+            //   while (isFlashBusy)
+            //     ;
+            // }
+            // Serial.println("Flash Done");
+            // }
+            flashBufferIndex = 0;
+            client.print('K');
           }
         }
       }
+      client.stop();
     }
   }
 }
@@ -370,8 +405,15 @@ void setup() {
     frameBuffer1[i] = 0X00;
   }
 
-  xTaskCreatePinnedToCore(Task_Wifi_Handle, "core0Task", 4096, NULL,
-                          tskIDLE_PRIORITY, &core0Task, 0);
+  xTaskCreatePinnedToCore(Task_Wifi_Handle, "core0Task", 16384, NULL, 1,
+                          &core0Task, 0);
+
+  for (long i = 0; i < FRAME_INPUT_SIZE / 3; i += 1) {
+    frameBuffer1[i * 4] = 0B11100001;
+    frameBuffer1[i * 4 + 1] = ledArray2[i * 3 + 2];
+    frameBuffer1[i * 4 + 2] = ledArray2[i * 3 + 1];
+    frameBuffer1[i * 4 + 3] = ledArray2[i * 3];
+  }
 
   // long ledCounter = 0;
   // long ledIndex = 0;
@@ -518,77 +560,78 @@ void copyMemoryToArms(uint8_t *inputBuffer, long armPosition) {
 
 void loop() {
 
-  switch (state) {
+  // switch (state) {
 
-  case (FIRST_STOP):
-    // Write all dark to turn off lights.
-    if (isLEDReady) {
-      spi_transaction_t transactionLED{
-          .cmd = 0X00,
-          .addr = 0X00,
-          .length = 5728,
-          .rxlength = 0,
-          .user = 0,
-          .tx_buffer = darkBuffer,
-      };
-      spi_device_queue_trans(deviceHandleLED, &transactionLED, portMAX_DELAY);
-      state = IDLE;
-    }
+  // case (FIRST_STOP):
+  //   // Write all dark to turn off lights.
+  //   if (isLEDReady) {
+  //     spi_transaction_t transactionLED{
+  //         .cmd = 0X00,
+  //         .addr = 0X00,
+  //         .length = 5728,
+  //         .rxlength = 0,
+  //         .user = 0,
+  //         .tx_buffer = darkBuffer,
+  //     };
+  //     spi_device_queue_trans(deviceHandleLED, &transactionLED,
+  //     portMAX_DELAY); state = IDLE;
+  //   }
 
-    break;
-  case (IDLE):
-    break;
+  //   break;
+  // case (IDLE):
+  //   break;
 
-  case (DISPLAY_LEDS):
-    // If magnet has not been hit in some time, stop display
-    // Add back for magnet operation
-    // if (spinCheckChrono.hasPassed(4000)) {
-    //   state = FIRST_STOP;
-    //   break;
-    // }
+  // case (DISPLAY_LEDS):
+  //   // If magnet has not been hit in some time, stop display
+  //   // Add back for magnet operation
+  //   // if (spinCheckChrono.hasPassed(4000)) {
+  //   //   state = FIRST_STOP;
+  //   //   break;
+  //   // }
 
-    if (frameChrono.hasPassed(3000)) {
-      frameChrono.restart();
-      if (frameNum == 0) {
-        frameNum = 1;
-        return;
-      }
-      if (frameNum == 1) {
-        frameNum = 0;
-        return;
-      }
-    }
+  //   // if (frameChrono.hasPassed(3000)) {
+  //   //   frameChrono.restart();
+  //   //   if (frameNum == 0) {
+  //   //     frameNum = 1;
+  //   //     return;
+  //   //   }
+  //   //   if (frameNum == 1) {
+  //   //     frameNum = 0;
+  //   //     return;
+  //   //   }
+  //   // }
 
-    // Change this to use magnet  for display switching or  time based
-    // if (ledChrono.hasPassed((long)(rotTime / 360))) {
-    if (ledChrono.hasPassed((long)(1500000 / 360))) {
+  //   // Change this to use magnet  for display switching or  time based
+  //   // if (ledChrono.hasPassed((long)(rotTime / 360))) {
+  //   if (ledChrono.hasPassed((long)(1500000 / 360))) {
 
-      ledChrono.restart();
-      armPosition += 1;
-      if (armPosition >= 360 / ANGLE_RESOLUTION_DEG) {
-        armPosition = 0;
-      }
-      if (isLEDReady) {
-        // Use this below for all 4 arms
-        // This take like 3 microseconds. No need to optimize
-        if (frameNum == 0) {
-          copyMemoryToArms(frameBuffer1, armPosition);
-        } else {
-          copyMemoryToArms(frameBuffer2, armPosition);
-        }
+  //     ledChrono.restart();
+  //     armPosition += 1;
+  //     if (armPosition >= 360 / ANGLE_RESOLUTION_DEG) {
+  //       armPosition = 0;
+  //     }
+  //     if (isLEDReady) {
+  //       // Use this below for all 4 arms
+  //       // This take like 3 microseconds. No need to optimize
+  //       if (frameNum == 0) {
+  //         copyMemoryToArms(frameBuffer1, armPosition);
+  //       } else {
+  //         copyMemoryToArms(frameBuffer2, armPosition);
+  //       }
 
-        spi_transaction_t transactionLED{
-            .cmd = 0X00,
-            .addr = 0X00,
-            .length = 5408,
-            .rxlength = 0,
-            .user = 0,
-            .tx_buffer = armBuffer,
-        };
-        spi_device_queue_trans(deviceHandleLED, &transactionLED, portMAX_DELAY);
-      }
-    }
+  //       spi_transaction_t transactionLED{
+  //           .cmd = 0X00,
+  //           .addr = 0X00,
+  //           .length = 5408,
+  //           .rxlength = 0,
+  //           .user = 0,
+  //           .tx_buffer = armBuffer,
+  //       };
+  //       spi_device_queue_trans(deviceHandleLED, &transactionLED,
+  //       portMAX_DELAY);
+  //     }
+  //   }
 
-    break;
-  }
+  //   break;
+  // }
 }
