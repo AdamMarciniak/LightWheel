@@ -47,10 +47,19 @@ The tricky thing is making sure the copying from flash to the frame buffer is fa
 
 
 ## Future work:
+
 - Over the air updates. (A real pain to upload code onto a thing that's atatched to a bike.)
 - Wifi frame uploads. 
 - Better code layout.
 - Animation.
 
 
+
 ![Messenger_creation_646104513979992](https://github.com/AdamMarciniak/LightWheel/assets/17841889/16a3c867-0d8f-48db-b668-52a30466e095)
+
+![PXL_20221210_053804004](https://github.com/AdamMarciniak/LightWheel/assets/17841889/8bed400d-b9d1-4cae-9a17-2e3ae7a545f2)
+
+![2022-12-17_19-50-57](https://github.com/AdamMarciniak/LightWheel/assets/17841889/293b3c79-08f9-46e0-9be3-0b682edadd74)
+
+
+
