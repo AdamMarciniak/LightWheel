@@ -47,9 +47,6 @@
   ((int)(BYTES_PER_FRAME / MAX_READ_SIZE) + 1) * MAX_READ_SIZE
 #define NUM_READ_PAGES (int)(ACTUAL_FRAME_DATA_SIZE / MAX_READ_SIZE)
 
-// This is the size of the input array of RGB values for a frame
-#define FRAME_INPUT_SIZE 45360
-
 // Offsets
 #define ARM_2_OFFSET ARM_OFFSET_SIZE * 2
 #define ARM_3_OFFSET ARM_OFFSET_SIZE * 3
@@ -74,16 +71,23 @@ enum State {
 // State state = FIRST_STOP;
 State state = DISPLAY_LEDS;
 
+unsigned long before = 0;
+unsigned long after = 0;
+
+unsigned long bef = 0;
+
 unsigned long lastMagnetTime = 0;
 unsigned long nextMagnetTime = 1000;
+
 unsigned long lastMagnetTime1 = 0;
 unsigned long nextMagnetTime1 = 1000;
 unsigned long rotTime = 1000;
-long armPosition = 0;
-int frameNum = 0;
+long armPos = 0;
 
+unsigned long timeStopped = 0;
+
+Chrono flashReadChrono;
 Chrono ledChrono(Chrono::MICROS);
-Chrono frameChrono;
 Chrono spinCheckChrono;
 
 void IRAM_ATTR magnetISR() {
@@ -97,42 +101,48 @@ void IRAM_ATTR magnetISR() {
   lastMagnetTime = lastMagnetTime1;
   nextMagnetTime = nextMagnetTime1;
   rotTime = nextMagnetTime - lastMagnetTime;
-  armPosition = 0;
+  armPos = 0;
   ledChrono.restart();
 }
 
-DRAM_ATTR boolean isFlashBusy = false;
-DRAM_ATTR boolean isLEDReady = true;
+boolean isSpinning = false;
 
-// Before we write to LED's, set ready to false to prevent more writes
-void IRAM_ATTR callBackPreLED(spi_transaction_t *trans) { isLEDReady = false; };
-
-// Once writing is done, allow writes
-void IRAM_ATTR callBackPostLED(spi_transaction_t *trans) { isLEDReady = true; };
-
-// Interrupt to help know when flash work is done
-void IRAM_ATTR callBackPreFlash(spi_transaction_t *trans) {
-  isFlashBusy = true;
-};
-void IRAM_ATTR callBackPostFlash(spi_transaction_t *trans) {
-  isFlashBusy = false;
-};
-
-const spi_bus_config_t spiConfigLED = {
+spi_bus_config_t spiConfigLED = {
     .mosi_io_num = 23,
     .sclk_io_num = 18,
     .max_transfer_sz = 0,
     .flags = SPICOMMON_BUSFLAG_MASTER,
 };
 
-const spi_bus_config_t spiConfigFlash = {
+spi_bus_config_t spiConfigFlash = {
     .mosi_io_num = 13,
     .miso_io_num = 12,
     .sclk_io_num = 14,
     .flags = SPICOMMON_BUSFLAG_MASTER,
 };
 
-// SPI config for LED SPI device
+DRAM_ATTR int queueStatus = 2;
+DRAM_ATTR int queueStatusFlash = 2;
+DRAM_ATTR boolean flashBusy = false;
+DRAM_ATTR boolean ledReady = true;
+
+int color = 1;
+
+unsigned long milPre = 0;
+unsigned long milPost = 0;
+
+// Before we write to LED's, set ready to false to prevent more writes
+void IRAM_ATTR callBackPreLED(spi_transaction_t *trans) { ledReady = false; };
+
+// Once writing is done, allow writes
+void IRAM_ATTR callBackPostLED(spi_transaction_t *trans) { ledReady = true; };
+
+// Same with flash
+void IRAM_ATTR callBackPreFlash(spi_transaction_t *trans) { flashBusy = true; };
+void IRAM_ATTR callBackPostFlash(spi_transaction_t *trans) {
+  flashBusy = false;
+};
+
 const spi_device_interface_config_t deviceConfigLED = {
     .command_bits = 8,
     .address_bits = 24,
@@ -143,44 +153,40 @@ const spi_device_interface_config_t deviceConfigLED = {
     .pre_cb = callBackPreLED,
     .post_cb = callBackPostLED};
 
-// SPI config for FLASH device
 const spi_device_interface_config_t deviceConfigFlash = {
-    // Extrac bits are configured in the extended config
     .command_bits = 0,
     .address_bits = 0,
     .dummy_bits = 0,
     .mode = 0,
-    // Anything faster messes up reading.
-    // Can maybe set to higher for writing later
-    .clock_speed_hz = SPI_MASTER_FREQ_26M,
+    .clock_speed_hz = 45000000,
     .spics_io_num = 15,
     .flags = SPI_DEVICE_HALFDUPLEX | SPI_DEVICE_NO_DUMMY,
     .queue_size = 1,
     .pre_cb = callBackPreFlash,
     .post_cb = callBackPostFlash};
 
+esp_err_t deviceResult;
+esp_err_t transactionResult;
 spi_device_handle_t deviceHandleLED;
-spi_device_handle_t deviceHandleFlash;
+spi_device_handle_t deviceHandleFlashErase;
+spi_device_handle_t deviceHandleFlashWriteEnable;
+spi_device_handle_t deviceHandleFlashWrite;
 
-// Holds current arm state
+uint8_t *frameBuffers[360];
+
 uint8_t *armBuffer;
-
-// Holds current arm state as all dark
 uint8_t *darkBuffer;
+uint8_t *frameData;
 
-// Holds one full frame each ready to be send to armBuffer.
-uint8_t *frameBuffer1;
-uint8_t *frameBuffer2;
-
-// Holds raw data from flash
 uint8_t *flashReadBuffer;
+uint8_t *bufferToRead = flashReadBuffer;
+uint8_t *testReadBuffer;
 
-// Small buffer to save flash busy state
 uint8_t *busyBuffer;
 
 // Writes to flash
 void writeData(spi_device_handle_t deviceHandle, size_t lengthInBits,
-               const uint8_t *tx_buffer, uint64_t address) {
+               uint8_t *tx_buffer, uint64_t address) {
   spi_transaction_t transactionFlashWrite{.flags = SPI_TRANS_VARIABLE_CMD |
                                                    SPI_TRANS_VARIABLE_ADDR,
                                           .cmd = CMD_PG_PROGRAM,
@@ -194,12 +200,30 @@ void writeData(spi_device_handle_t deviceHandle, size_t lengthInBits,
                                                  .dummy_bits = 0};
   spi_device_transmit(deviceHandle,
                       (spi_transaction_t *)&transactionFlashWriteExt);
+
+  delay(10);
 }
 
 void writeEnable(spi_device_handle_t deviceHandle) {
   spi_transaction_t transactionFlashWrite{
       .flags = SPI_TRANS_VARIABLE_CMD | SPI_TRANS_VARIABLE_ADDR,
       .cmd = CMD_WRITE_ENABLE,
+      .length = 0,
+      .rxlength = 0,
+  };
+  spi_transaction_ext_t transactionFlashWriteExt{.base = transactionFlashWrite,
+                                                 .command_bits = 8,
+                                                 .address_bits = 0,
+                                                 .dummy_bits = 0};
+  spi_device_transmit(deviceHandle,
+                      (spi_transaction_t *)&transactionFlashWriteExt);
+  delay(10);
+}
+
+void writeDisable(spi_device_handle_t deviceHandle) {
+  spi_transaction_t transactionFlashWrite{
+      .flags = SPI_TRANS_VARIABLE_CMD | SPI_TRANS_VARIABLE_ADDR,
+      .cmd = 0X04,
       .length = 0,
       .rxlength = 0,
   };
@@ -263,9 +287,11 @@ void chipErase(spi_device_handle_t deviceHandle) {
   delay(10);
 }
 
+long ledCounter = 0;
+long ledIndex = 0;
+
 void setup() {
   Serial.begin(115200);
-  Serial.println("STarted!");
 
   pinMode(MAGNET_SENSE_PIN, INPUT_PULLUP);
 
@@ -274,16 +300,13 @@ void setup() {
   ESP_ERROR_CHECK(
       spi_bus_add_device(LED_HOST, &deviceConfigLED, &deviceHandleLED));
   ESP_ERROR_CHECK(spi_bus_initialize(FLASH_HOST, &spiConfigFlash, 1));
-  ESP_ERROR_CHECK(
-      spi_bus_add_device(FLASH_HOST, &deviceConfigFlash, &deviceHandleFlash));
+  ESP_ERROR_CHECK(spi_bus_add_device(FLASH_HOST, &deviceConfigFlash,
+                                     &deviceHandleFlashWrite));
 
   // Init memory buffers
 
   // Holds data of whole frame
-  frameBuffer1 = static_cast<uint8_t *>(
-      heap_caps_malloc(ACTUAL_FRAME_DATA_SIZE, MALLOC_CAP_DMA));
-
-  frameBuffer2 = static_cast<uint8_t *>(
+  flashReadBuffer = static_cast<uint8_t *>(
       heap_caps_malloc(ACTUAL_FRAME_DATA_SIZE, MALLOC_CAP_DMA));
 
   // Flag for knowing when flash is busy
@@ -295,27 +318,8 @@ void setup() {
   // Holds data for arms when dark
   darkBuffer = static_cast<uint8_t *>(heap_caps_malloc(716, MALLOC_CAP_DMA));
 
-  // Holds data from flash reading
-  flashReadBuffer = static_cast<uint8_t *>(
-      heap_caps_malloc(FRAME_INPUT_SIZE, MALLOC_CAP_DMA));
-
   for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE; i += 1) {
-    frameBuffer1[i] = 0X00;
-  }
-
-  long ledCounter = 0;
-  long ledIndex = 0;
-  for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE - 4; i += 4) {
-    ledIndex = ledCounter * 3;
-    if (ledIndex >= 45360) {
-      ledCounter = 0;
-      ledIndex = ledCounter * 3;
-    }
-    frameBuffer1[i] = 0B11100001;
-    frameBuffer1[i + 1] = ledArray2[ledIndex + 2];
-    frameBuffer1[i + 2] = ledArray2[ledIndex + 1];
-    frameBuffer1[i + 3] = ledArray2[ledIndex];
-    ledCounter += 1;
+    flashReadBuffer[i] = 0X00;
   }
 
   ledCounter = 0;
@@ -326,82 +330,11 @@ void setup() {
       ledCounter = 0;
       ledIndex = ledCounter * 3;
     }
-    frameBuffer2[i] = 0B11100001;
-    frameBuffer2[i + 1] = ledArray3[ledIndex + 2];
-    frameBuffer2[i + 2] = ledArray3[ledIndex + 1];
-    frameBuffer2[i + 3] = ledArray3[ledIndex];
+    flashReadBuffer[i] = 0B11100001;
+    flashReadBuffer[i + 1] = ledArray2[ledIndex + 2];
+    flashReadBuffer[i + 2] = ledArray2[ledIndex + 1];
+    flashReadBuffer[i + 3] = ledArray2[ledIndex];
     ledCounter += 1;
-  }
-
-  writeEnable(deviceHandleFlash);
-  chipErase(deviceHandleFlash);
-  waitBusy(deviceHandleFlash);
-  Serial.println("Finished Erase");
-
-  // Writing 45568 per frame to flash chip
-  // Try writing the raw progmem stuff to flash as a test
-  for (long i = 0; i < (FRAME_INPUT_SIZE / MAX_FLASH_WRITE_BYTES) + 1; i += 1) {
-    long address = i * MAX_FLASH_WRITE_BYTES;
-    writeEnable(deviceHandleFlash);
-    writeData(deviceHandleFlash, MAX_FLASH_WRITE_BYTES * 8, &ledArray2[address],
-              address);
-
-    while (isFlashBusy)
-      ;
-    Serial.println("Wrote data.");
-  }
-
-  Serial.println("Writing data done");
-
-  spi_transaction_t transactionRead{
-      .flags = SPI_TRANS_VARIABLE_CMD | SPI_TRANS_VARIABLE_ADDR |
-               SPI_TRANS_VARIABLE_DUMMY,
-      .cmd = CMD_READ_DATA_FAST,
-      .addr = 0,
-      .length = 8,
-      .rxlength = 8 * MAX_READ_SIZE,
-      .rx_buffer = flashReadBuffer,
-  };
-
-  spi_transaction_ext_t transactionReadExt{
-      .base = transactionRead,
-      .command_bits = 8,
-      .address_bits = 24,
-      // If reading data fast, must use 8 dummy bits
-      .dummy_bits = 8};
-  spi_device_queue_trans(deviceHandleFlash,
-                         (spi_transaction_t *)&transactionReadExt,
-                         portMAX_DELAY);
-
-  while (isFlashBusy) {
-    Serial.println("Flash busy reading..");
-  }
-  Serial.println("Flash DONE");
-
-  // for (long i = 0; i < 150; i += 1) {
-  //   // Serial.println(flashReadBuffer[i], BIN);
-  //   Serial.println(static_cast<int>(flashReadBuffer[i]));
-  // }
-  ledCounter = 0;
-  ledIndex = 0;
-  long st = micros();
-  for (long i = 0; i < ACTUAL_FRAME_DATA_SIZE - 4; i += 4) {
-    ledIndex = ledCounter * 3;
-    if (ledIndex >= FRAME_INPUT_SIZE) {
-      ledCounter = 0;
-      ledIndex = ledCounter * 3;
-    }
-    frameBuffer1[i] = 0B11100001;
-    frameBuffer1[i + 1] = flashReadBuffer[ledIndex + 2];
-    frameBuffer1[i + 2] = flashReadBuffer[ledIndex + 1];
-    frameBuffer1[i + 3] = flashReadBuffer[ledIndex];
-    ledCounter += 1;
-  }
-  Serial.print("Time for conversion: ");
-  Serial.println(micros() - st);
-
-  for (long i = 0; i < 150; i += 1) {
-    Serial.println(static_cast<int>(frameBuffer1[i]));
   }
 
   armBuffer[676 - 4] = 0XFF;
@@ -425,23 +358,7 @@ void setup() {
   lastMagnetTime = micros();
   nextMagnetTime = micros();
 
-  attachInterrupt(MAGNET_SENSE_PIN, magnetISR, FALLING);
-}
-
-void copyMemoryToArms(uint8_t *inputBuffer, long armPosition) {
-  memcpy(armBuffer, &inputBuffer[armPosition * BYTES_PER_ARM], BYTES_PER_ARM);
-  memcpy(&armBuffer[BYTES_PER_ARM],
-         &inputBuffer[(armPosition * BYTES_PER_ARM + ARM_OFFSET_SIZE) %
-                      BYTES_PER_FRAME],
-         BYTES_PER_ARM);
-  memcpy(&armBuffer[BYTES_PER_ARM * 2],
-         &inputBuffer[(armPosition * BYTES_PER_ARM + ARM_2_OFFSET) %
-                      BYTES_PER_FRAME],
-         BYTES_PER_ARM);
-  memcpy(&armBuffer[BYTES_PER_ARM * 3],
-         &inputBuffer[(armPosition * BYTES_PER_ARM + ARM_3_OFFSET) %
-                      BYTES_PER_FRAME],
-         BYTES_PER_ARM);
+  attachInterrupt(5, magnetISR, FALLING);
 }
 
 void loop() {
@@ -450,7 +367,7 @@ void loop() {
 
   case (FIRST_STOP):
     // Write all dark to turn off lights.
-    if (isLEDReady) {
+    if (ledReady == true) {
       spi_transaction_t transactionLED{
           .cmd = 0X00,
           .addr = 0X00,
@@ -475,35 +392,33 @@ void loop() {
       break;
     }
 
-    if (frameChrono.hasPassed(3000)) {
-      frameChrono.restart();
-      if (frameNum == 0) {
-        frameNum = 1;
-        return;
-      }
-      if (frameNum == 1) {
-        frameNum = 0;
-        return;
-      }
-    }
-
     // Change this to use magnet  for display switching or  time based
     if (ledChrono.hasPassed((long)(rotTime / 360))) {
       // if (ledChrono.hasPassed((long)(1500000 / 360))) {
 
       ledChrono.restart();
-      armPosition += 1;
-      if (armPosition >= 360 / ANGLE_RESOLUTION_DEG) {
-        armPosition = 0;
+      armPos += 1;
+      if (armPos >= 360 / ANGLE_RESOLUTION_DEG) {
+        armPos = 0;
       }
-      if (isLEDReady) {
+      if (ledReady == true) {
         // Use this below for all 4 arms
         // This take like 3 microseconds. No need to optimize
-        if (frameNum == 0) {
-          copyMemoryToArms(frameBuffer1, armPosition);
-        } else {
-          copyMemoryToArms(frameBuffer2, armPosition);
-        }
+        memcpy(armBuffer, &flashReadBuffer[armPos * BYTES_PER_ARM],
+               BYTES_PER_ARM);
+
+        memcpy(&armBuffer[BYTES_PER_ARM],
+               &flashReadBuffer[(armPos * BYTES_PER_ARM + ARM_OFFSET_SIZE) %
+                                BYTES_PER_FRAME],
+               BYTES_PER_ARM);
+        memcpy(&armBuffer[BYTES_PER_ARM * 2],
+               &flashReadBuffer[(armPos * BYTES_PER_ARM + ARM_2_OFFSET) %
+                                BYTES_PER_FRAME],
+               BYTES_PER_ARM);
+        memcpy(&armBuffer[BYTES_PER_ARM * 3],
+               &flashReadBuffer[(armPos * BYTES_PER_ARM + ARM_3_OFFSET) %
+                                BYTES_PER_FRAME],
+               BYTES_PER_ARM);
 
         spi_transaction_t transactionLED{
             .cmd = 0X00,
